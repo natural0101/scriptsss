@@ -1,0 +1,218 @@
+// == SpeechSense → transcripts_pack (N).txt ==
+// Для расширения "User JavaScript & CSS", URL-паттерн: https://speechsense.yandex.cloud/*
+
+(() => {
+  const BTN_ID = "ss-collect-btn";
+  if (document.getElementById(BTN_ID)) return; // идемпотентно
+
+  // ---------- утилиты ----------
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const until = async (pred, { timeout = 20000, every = 150 } = {}) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      const v = await pred();
+      if (v) return v;
+      await sleep(every);
+    }
+    return null;
+  };
+  const dispatchClick = (el) => {
+    const ev = new MouseEvent("click", { bubbles: true, cancelable: true, view: window });
+    el.dispatchEvent(ev);
+  };
+  // поиск с обходом Shadow DOM
+  const queryAllDeep = (sel, root = document) => {
+    const out = [];
+    const walk = (node) => {
+      if (!node) return;
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        try { node.matches && node.matches(sel) && out.push(node); } catch {}
+        node.querySelectorAll && node.querySelectorAll(sel).forEach(x => out.push(x));
+        if (node.shadowRoot) walk(node.shadowRoot);
+      }
+      node.childNodes && node.childNodes.forEach(walk);
+    };
+    walk(root);
+    return Array.from(new Set(out));
+  };
+  const queryDeep = (sel, root) => queryAllDeep(sel, root)[0] || null;
+
+  const downloadTxt = (filename, text) => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  };
+
+  const getNodePlainText = (node) =>
+    (node?.textContent || "")
+      .replace(/\u00A0/g, " ")
+      .replace(/[ \t]+\n/g, "\n")
+      .trim();
+
+  // ---------- форматирование реплик ----------
+  // Превращаем "Роль00:01Текст" в три строки:
+  const formatPhrase = (raw) => {
+    const t = (raw || "").replace(/\u00A0/g, " ").trim();
+    // сначала пробуем «чистую» разметку, если фронт когда-то выделит поля
+    const roleNode = queryDeep('[class*="role"]', raw instanceof Element ? raw : null);
+    const timeNode = queryDeep('[class*="time"]', raw instanceof Element ? raw : null);
+    const textNode = queryDeep('[class*="text"]', raw instanceof Element ? raw : null);
+    if (roleNode && timeNode && textNode) {
+      return `${getNodePlainText(roleNode)}\n${getNodePlainText(timeNode)}\n${getNodePlainText(textNode)}`;
+    }
+    // иначе — эвристика по таймкоду
+    const m = t.match(/^(.+?)(\d{2}:\d{2})([\s\S]*)$/);
+    if (!m) return t; // вдруг без таймкода — оставляем как есть
+    const role = m[1].trim();
+    const time = m[2].trim();
+    const text = m[3].trim();
+    return `${role}\n${time}\n${text}`;
+  };
+
+  // ---------- селекторы из твоего DOM-среза ----------
+  const SEL = {
+    listTable: "table.gt-styled-table.DialogTable",
+    listRow: "tr.gt-table__row.DialogTable__Row",
+    rowClickable: 'tr.gt-table__row.DialogTable__Row, tr.gt-table__row.DialogTable__Row td',
+    cardContainer: "div.ChatDialog__Phrases",
+    phrase: "div.UserPhrase__Container"
+  };
+
+  // ---------- сбор текущей карточки ----------
+  const collectCurrentCard = () => {
+    const container = queryDeep(SEL.cardContainer);
+    if (!container) return null;
+    const phraseEls = queryAllDeep(SEL.phrase, container);
+    if (!phraseEls.length) return null;
+
+    const lines = [];
+    for (const el of phraseEls) {
+      const raw = getNodePlainText(el);
+      if (!raw) continue;
+      lines.push(formatPhrase(raw));
+    }
+    return lines.join("\n"); // без лишних пустых строк внутри диалога
+  };
+
+  // ---------- открыть карточку по строке списка ----------
+  const openRowCard = async (rowEl) => {
+    rowEl.scrollIntoView({ block: "center" });
+    dispatchClick(rowEl);
+    let ok = await until(() => queryDeep(SEL.cardContainer));
+    if (!ok) {
+      const td = rowEl.querySelector("td");
+      if (td) { dispatchClick(td); ok = await until(() => queryDeep(SEL.cardContainer)); }
+    }
+    return !!ok;
+  };
+
+  // ---------- вернуться к списку ----------
+  const backToList = async () => {
+    // пробуем явные кнопки/крошки; если не нашли — history.back()
+    const candidates = [
+      'button[aria-label*="Назад"]',
+      'a[href*="/projects/"]',
+      'button:has(span), a:has(span)'
+    ];
+    let clicked = false;
+    for (const s of candidates) {
+      const el = queryDeep(s);
+      if (el && /назад|диалоги|список/i.test(el.textContent || "")) {
+        dispatchClick(el); clicked = true; break;
+      }
+    }
+    if (!clicked) history.back();
+    return !!(await until(() => queryDeep(SEL.listTable)));
+  };
+
+  // ---------- основной сценарий ----------
+  const run = async () => {
+    try {
+      btn.disabled = true;
+      btn.textContent = "Собираю…";
+
+      const table = queryDeep(SEL.listTable);
+
+      // если мы уже в карточке — просто снять текущий диалог
+      if (!table) {
+        const txt = collectCurrentCard();
+        if (!txt) {
+          alert("Не найден блок диалога на этой странице");
+        } else {
+          const content = `=== DIALOG 1 ===\n${txt}`;
+          downloadTxt(`transcripts_pack (1).txt`, content);
+        }
+        return;
+      }
+
+      // мы на списке
+      const rows = queryAllDeep(SEL.listRow, table);
+      const total = rows.length;
+      if (!total) { alert("Строк диалогов не найдено"); return; }
+
+      let n = prompt(`Сколько диалогов собрать? (видимо на странице: ${total})`, String(total));
+      n = Math.max(1, Math.min(total, parseInt(n || `${total}`, 10) || total));
+
+      const selected = rows.slice(0, n);
+      const blocks = [];
+
+      for (let i = 0; i < selected.length; i++) {
+        const row = selected[i];
+
+        const opened = await openRowCard(row);
+        if (!opened) { blocks.push(`=== DIALOG ${i + 1} ===\n[ошибка: не удалось открыть карточку]`); break; }
+
+        const txt = collectCurrentCard();
+        blocks.push(`=== DIALOG ${i + 1} ===\n${txt || "[пусто]"}`);
+
+        const backOk = await backToList();
+        if (!backOk) { blocks.push(`[остановка: не удалось вернуться к списку]`); break; }
+
+        await sleep(120); // подождать ререндер списка
+      }
+
+      const content = blocks.filter(Boolean).join("\n\n");
+      const filename = `transcripts_pack (${blocks.length}).txt`;
+      downloadTxt(filename, content);
+
+    } catch (e) {
+      console.error("SpeechSense collector error:", e);
+      alert("Ошибка при сборе диалогов. См. консоль.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Собрать диалоги";
+    }
+  };
+
+  // ---------- кнопка ----------
+  const btn = document.createElement("button");
+  btn.id = BTN_ID;
+  btn.textContent = "Собрать диалоги";
+  Object.assign(btn.style, {
+    position: "fixed",
+    right: "16px",
+    bottom: "16px",
+    zIndex: "2147483647",
+    padding: "10px 14px",
+    borderRadius: "12px",
+    border: "1px solid rgba(0,0,0,.12)",
+    background: "#111",
+    color: "#fff",
+    fontFamily: "system-ui,-apple-system,Segoe UI,Roboto,Arial",
+    fontSize: "14px",
+    cursor: "pointer",
+    boxShadow: "0 6px 16px rgba(0,0,0,.2)"
+  });
+  btn.addEventListener("click", run);
+
+  const mount = () => document.body && document.body.appendChild(btn);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mount);
+  } else {
+    mount();
+  }
+})();
