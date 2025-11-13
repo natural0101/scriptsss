@@ -1,19 +1,34 @@
-// === DataLens: "Все звонки" -> Скачать все звонки в all_dialogs.txt (через пагинацию) ===
+// === DataLens -> Скачать все строки таблицы в all_dialogs.txt (через пагинацию) ===
+// Работает для виджетов с заголовками:
+// 1) "Все звонки"
+// 2) "Итоговый балл, все звонки"
+// 3) "Итоговый балл, среднее значение с группировкой по дате"
 (function () {
-  const TITLE = 'Все звонки';
+  const TITLES = [
+    'Все звонки',
+    'Итоговый балл, все звонки',
+    'Итоговый балл, среднее значение с группировкой по дате'
+  ];
   const BTN_CLASS = 'dl-download-all-calls-btn';
 
-  // ---------- Поиск виджета / таблицы ----------
+  // ---------- Поиск виджетов / таблиц ----------
 
-  function findTitleEl() {
-    const xpath = `//*[normalize-space(text())='${TITLE}']`;
-    return document.evaluate(
-      xpath,
-      document,
-      null,
-      XPathResult.FIRST_ORDERED_NODE_TYPE,
-      null
-    ).singleNodeValue || null;
+  function findTitleElements() {
+    const result = [];
+    for (const title of TITLES) {
+      const xpath = `//*[normalize-space(text())='${title}']`;
+      const snapshot = document.evaluate(
+        xpath,
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null
+      );
+      for (let i = 0; i < snapshot.snapshotLength; i++) {
+        result.push(snapshot.snapshotItem(i));
+      }
+    }
+    return result;
   }
 
   function findWidgetParts(titleEl) {
@@ -79,14 +94,12 @@
   function collectCallsFromTable(table) {
     const rows = Array.from(table.querySelectorAll('tbody tr'));
     const lines = [];
-
     for (const tr of rows) {
       const tds = Array.from(tr.querySelectorAll('td'));
       if (!tds.length) continue;
       const rowText = tds.map(cellToText).join('\t');
       lines.push(rowText);
     }
-
     return lines;
   }
 
@@ -156,7 +169,7 @@
       if (pager) {
         const buttons = Array.from(pager.querySelectorAll('button'));
         if (buttons.length) {
-          // в типичной верстке: [назад] [1] [2] [вперёд] — берем последний как "вперёд"
+          // типичная верстка: [назад] [1] [2] [вперёд] — берём последний как "вперёд"
           const nextBtn = buttons[buttons.length - 1];
           if (nextBtn && !isDisabled(nextBtn)) return nextBtn;
         }
@@ -172,17 +185,13 @@
     return null;
   }
 
-  // ---------- Сбор всех страниц ----------
+  // ---------- Сбор всех страниц для КОНКРЕТНОГО виджета ----------
 
-  async function collectAllPages() {
+  async function collectAllPages(widget) {
     const allLines = [];
     let pageIndex = 0;
 
     while (true) {
-      const titleEl = findTitleEl();
-      if (!titleEl) throw new Error('Не найден заголовок "Все звонки".');
-
-      const { widget } = findWidgetParts(titleEl);
       const table = findTable(widget);
       if (!table) throw new Error('Не найдена таблица внутри виджета.');
 
@@ -224,15 +233,14 @@
     URL.revokeObjectURL(url);
   }
 
-  async function downloadCalls() {
-    const btn = document.querySelector('.' + BTN_CLASS);
+  async function downloadCalls(widget, btn) {
     try {
       if (btn) {
         btn.disabled = true;
         btn.textContent = 'Собираю...';
       }
 
-      const allText = await collectAllPages();
+      const allText = await collectAllPages(widget);
       if (!allText.trim()) {
         throw new Error('Не удалось собрать строки (возможно, таблица пустая).');
       }
@@ -244,49 +252,51 @@
     } finally {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = 'Скачать все звонки';
+        btn.textContent = 'Скачать все строки';
       }
     }
   }
 
-  // ---------- Кнопка в виджете ----------
+  // ---------- Кнопки в каждом виджете ----------
 
-  function injectButton() {
-    const titleEl = findTitleEl();
-    if (!titleEl) return;
+  function injectButtons() {
+    const titleEls = findTitleElements();
+    if (!titleEls.length) return;
 
-    const { widget, header } = findWidgetParts(titleEl);
-    if (!widget || !header) return;
+    for (const titleEl of titleEls) {
+      const { widget, header } = findWidgetParts(titleEl);
+      if (!widget || !header) continue;
 
-    if (header.querySelector('.' + BTN_CLASS)) return;
+      if (header.querySelector('.' + BTN_CLASS)) continue; // уже есть
 
-    const btn = document.createElement('button');
-    btn.className = BTN_CLASS;
-    btn.textContent = 'Скачать все звонки';
+      const btn = document.createElement('button');
+      btn.className = BTN_CLASS;
+      btn.textContent = 'Скачать все строки';
 
-    Object.assign(btn.style, {
-      marginLeft: '8px',
-      padding: '6px 10px',
-      fontSize: '12px',
-      borderRadius: '8px',
-      border: '1px solid #d1d5db',
-      background: '#ffffff',
-      cursor: 'pointer'
-    });
+      Object.assign(btn.style, {
+        marginLeft: '8px',
+        padding: '6px 10px',
+        fontSize: '12px',
+        borderRadius: '8px',
+        border: '1px solid #d1d5db',
+        background: '#ffffff',
+        cursor: 'pointer'
+      });
 
-    btn.addEventListener('click', downloadCalls);
+      btn.addEventListener('click', () => downloadCalls(widget, btn));
 
-    const rightHost =
-      header.querySelector('[class*="actions"], [class*="toolbar"], [class*="controls"]') ||
-      header;
-    rightHost.appendChild(btn);
+      const rightHost =
+        header.querySelector('[class*="actions"], [class*="toolbar"], [class*="controls"]') ||
+        header;
+      rightHost.appendChild(btn);
+    }
   }
 
   // ---------- Инициализация ----------
 
   function init() {
-    injectButton();
-    const mo = new MutationObserver(() => injectButton());
+    injectButtons();
+    const mo = new MutationObserver(() => injectButtons());
     mo.observe(document.body, { childList: true, subtree: true });
   }
 
