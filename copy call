@@ -1,0 +1,195 @@
+// Для "User JavaScript & CSS", URL-паттерн: https://speechsense.yandex.cloud/*
+
+(() => {
+  const BTN_ID = 'ss-harvest-btn';
+  if (document.getElementById(BTN_ID)) return;
+
+  async function runHarvest() {
+    const Q = parseInt(prompt('Сколько диалогов собрать?', 50), 10) || 50;
+
+    const tx = (e) =>
+      (e?.innerText || '')
+        .replace(/\s*\n+\s*/g, ' ')
+        .trim();
+
+    // умный выбор URL: сначала диалог в SpeechSense, иначе первый попавшийся
+    const url = (n) => {
+      const links = [...n.querySelectorAll('a[href]')]
+        .map(a => (a.href || '').trim())
+        .filter(Boolean);
+
+      if (links.length) {
+        const dialog = links.find(h =>
+          h.includes('speechsense.yandex.cloud') && h.includes('/dialogs/')
+        );
+        return (dialog || links[0]).replace(/[),.;]+$/, '');
+      }
+
+      const m = tx(n).match(/https?:\/\/\S+/);
+      return m ? m[0].replace(/[),.;]+$/, '') : '';
+    };
+
+    const sleep = (t) => new Promise((r) => setTimeout(r, t));
+
+    const scroller = (() => {
+      let best = document.scrollingElement;
+      let bestDelta = (best.scrollHeight - best.clientHeight) || 0;
+
+      for (const el of document.querySelectorAll('div,section,main,article')) {
+        const d = el.scrollHeight - el.clientHeight;
+        if (d > bestDelta + 20) {
+          best = el;
+          bestDelta = d;
+        }
+      }
+      return best;
+    })();
+
+    function getRows() {
+      const tb = document.querySelector('table tbody');
+      if (tb) {
+        return {
+          rows: [...tb.querySelectorAll('tr')],
+          cells: (r) => [...r.querySelectorAll('td')],
+        };
+      }
+
+      const grid = document.querySelector('[role="grid"],[role="table"]');
+      if (grid) {
+        const head = grid.querySelector(
+          '[role="row"] [role="columnheader"],[role="rowheader"]'
+        )
+          ? grid.querySelector('[role="row"]')
+          : null;
+
+        return {
+          rows: [...grid.querySelectorAll('[role="row"]')].filter((r) => r !== head),
+          cells: (r) => [...r.querySelectorAll('[role="cell"],[role="gridcell"]')],
+        };
+      }
+
+      return null;
+    }
+
+    const out = [];
+    const seen = new Set();
+
+    async function harvest() {
+      const g = getRows();
+      if (!g) return;
+
+      for (const r of g.rows) {
+        if (out.length >= Q) break;
+
+        const tds = g.cells(r);
+        if (!tds || !tds.length) continue;
+
+        const vals = tds.map(tx);
+        const u = url(r);
+
+        // не вставляем только если URL уже есть отдельной ячейкой
+        if (u && !vals.includes(u)) {
+          vals.splice(1, 0, u);
+        }
+
+        const line = vals.join('\t').trim();
+        if (line && !seen.has(line)) {
+          seen.add(line);
+          out.push(line);
+        }
+      }
+    }
+
+    let stuck = 0;
+    let loops = 0;
+    const t0 = Date.now();
+
+    btn.disabled = true;
+    btn.textContent = '…';
+
+    for (;;) {
+      await harvest();
+      if (out.length >= Q) break;
+
+      const before = scroller.scrollTop;
+      scroller.scrollTop = Math.min(
+        scroller.scrollTop + Math.max(200, scroller.clientHeight * 0.9),
+        scroller.scrollHeight
+      );
+
+      await sleep(220);
+
+      const cur = scroller.scrollTop;
+      stuck = cur === before ? stuck + 1 : 0;
+      loops++;
+
+      if (stuck >= 6 || Date.now() - t0 > 120000 || loops > 800) break;
+    }
+
+    await harvest();
+
+    if (!out.length) {
+      alert('Ничего не собрано');
+      btn.disabled = false;
+      btn.textContent = '⇩';
+      return;
+    }
+
+    const text = out.join('\n');
+
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+
+    alert('Скопировано: ' + out.length + ' из ' + Q);
+
+    btn.disabled = false;
+    btn.textContent = '⇩';
+  }
+
+  // маленькая кнопка слева снизу
+  const btn = document.createElement('button');
+  btn.id = BTN_ID;
+  btn.textContent = '⇩';
+
+  Object.assign(btn.style, {
+    position: 'fixed',
+    left: '12px',
+    bottom: '12px',
+    zIndex: '2147483647',
+    padding: '4px 8px',
+    borderRadius: '999px',
+    border: '1px solid rgba(0,0,0,.18)',
+    background: 'rgba(0,0,0,.75)',
+    color: '#fff',
+    fontFamily: 'system-ui,-apple-system,Segoe UI,Roboto,Arial',
+    fontSize: '11px',
+    cursor: 'pointer',
+    boxShadow: '0 4px 10px rgba(0,0,0,.3)',
+    opacity: '0.7',
+  });
+
+  btn.addEventListener('mouseenter', () => {
+    btn.style.opacity = '1';
+  });
+  btn.addEventListener('mouseleave', () => {
+    btn.style.opacity = '0.7';
+  });
+  btn.addEventListener('click', () => {
+    runHarvest();
+  });
+
+  const mount = () => document.body && document.body.appendChild(btn);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mount);
+  } else {
+    mount();
+  }
+})();
